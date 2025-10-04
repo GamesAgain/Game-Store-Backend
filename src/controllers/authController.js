@@ -3,13 +3,17 @@ const bcrypt = require("bcrypt");
 const db = require("../config/db");
 const { generateToken } = require("../utils/jwt");
 
-// ⬇️ เพิ่มบรรทัดนี้ (ไม่ต้อง import upload ที่นี่)
+// ไม่ต้อง import multer ที่นี่ ใช้เฉพาะ util สำหรับประมวลผลรูป
 const { processImageToWebpSquare, uploadBufferToCloudinary } = require("../services/upload");
 
 function send500(res, err) {
   return res.status(500).json({ success: false, message: err?.message || String(err) });
 }
 
+/**
+ * POST /api/auth/register
+ * form-data (optional file: avatar): { username, email, password, wallet? }
+ */
 exports.register = async (req, res) => {
   let { username, email, password, wallet } = req.body || {};
 
@@ -28,6 +32,7 @@ exports.register = async (req, res) => {
   }
 
   try {
+    // กันซ้ำเบื้องต้น (แนะนำให้มี UNIQUE ใน DB ตาม schema อยู่แล้ว)
     const [dup] = await db.query(
       "SELECT 1 FROM users WHERE username = ? OR email = ? LIMIT 1",
       [username, email]
@@ -36,7 +41,7 @@ exports.register = async (req, res) => {
       return res.json({ success: false, message: "Username หรือ Email ถูกใช้งานแล้ว" });
     }
 
-    // ⬇️ อัปโหลดรูป (optional) — ถ้าไฟล์พังจะข้ามและสมัครต่อ
+    // อัปโหลดรูปโปรไฟล์ (ถ้ามี) – หากล้มเหลวจะไม่บล็อกการสมัคร
     let imgUrl = null;
     if (req.file?.buffer) {
       try {
@@ -61,6 +66,7 @@ exports.register = async (req, res) => {
 
     const uid = result.insertId;
 
+    // ดึงข้อมูลกลับมายืนยัน
     const [rows] = await db.query(
       `SELECT uid, username, email, img, role, wallet_balance, created_at
        FROM users
@@ -80,7 +86,7 @@ exports.register = async (req, res) => {
       success: true,
       message: "สมัครสมาชิกสำเร็จ",
       token,
-      user,
+      user, // มีฟิลด์ img กลับไปด้วย
     });
   } catch (err) {
     if (err && err.code === "ER_DUP_ENTRY") {
@@ -90,12 +96,10 @@ exports.register = async (req, res) => {
   }
 };
 
-// login เดิมคงไว้…
-
-
 /**
  * POST /api/auth/login
- * body: { username, email, password }  // provide either username or email
+ * body: { username?, email?, password }  // ใส่ username หรือ email อย่างใดอย่างหนึ่ง
+ * response.user จะมี "img" เสมอ (ถ้าไม่มีรูปจะเป็น null)
  */
 exports.login = async (req, res) => {
   const { username, email, password } = req.body || {};
@@ -105,17 +109,17 @@ exports.login = async (req, res) => {
       success: false,
       message: "กรุณากรอก username/email และ password",
     });
-    }
+  }
 
   try {
     const identity = (username || email || "").toString().trim();
     const identityLower = identity.toLowerCase();
 
-    // Look up by username OR email (email case-insensitive)
+    // ค้นหาจาก username แบบตรงตัว หรือ email แบบไม่แคร์ตัวพิมพ์
     const [rows] = await db.query(
       `SELECT uid, username, email, password_hash, img, role, wallet_balance, created_at
        FROM users
-       WHERE username = ? OR email = ?
+       WHERE username = ? OR LOWER(email) = ?
        LIMIT 1`,
       [identity, identityLower]
     );
@@ -124,27 +128,35 @@ exports.login = async (req, res) => {
       return res.json({ success: false, message: "ไม่พบผู้ใช้" });
     }
 
-    const userRow = rows[0];
+    const row = rows[0];
 
-    const ok = await bcrypt.compare(password, userRow.password_hash);
+    const ok = await bcrypt.compare(password, row.password_hash);
     if (!ok) {
       return res.json({ success: false, message: "รหัสผ่านไม่ถูกต้อง" });
     }
 
-    // Do not return password_hash
-    const { password_hash, ...safeUser } = userRow;
+    // สร้างอ็อบเจ็กต์ user ที่ปลอดภัย และการันตีว่ามี key img
+    const user = {
+      uid: row.uid,
+      username: row.username,
+      email: row.email,
+      img: row.img || null,           // ✅ การันตีส่งคืน img
+      role: row.role,
+      wallet_balance: row.wallet_balance,
+      created_at: row.created_at,
+    };
 
     const token = generateToken({
-      uid: safeUser.uid,
-      username: safeUser.username,
-      role: safeUser.role, // 'USER' or 'ADMIN'
+      uid: user.uid,
+      username: user.username,
+      role: user.role, // 'USER' | 'ADMIN'
     });
 
     return res.json({
       success: true,
       message: "เข้าสู่ระบบสำเร็จ",
       token,
-      user: safeUser,
+      user,
     });
   } catch (err) {
     return send500(res, err);
