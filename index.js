@@ -9,6 +9,7 @@ const orderRoutes = require("./src/routes/orderRoutes");
 const walletRoutes = require("./src/routes/walletRoutes");
 const adminRoutes = require("./src/routes/adminRoutes");
 const uploadRoutes = require("./src/routes/uploadRoutes");
+const profileRoutes = require("./src/routes/profileRoutes");
 
 const app = express();
 const os = require("os");
@@ -34,6 +35,7 @@ app.use("/api/game", gameRoutes);
 app.use("/api/order", orderRoutes);
 app.use("/api/wallet", walletRoutes);
 app.use("/api/admin", adminRoutes);
+app.use("/api/profile", profileRoutes);
 
 app.use("/api/upload", uploadRoutes);
 
