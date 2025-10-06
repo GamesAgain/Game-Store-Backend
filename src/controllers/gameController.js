@@ -67,9 +67,17 @@ exports.list = async (_req, res) => {
   try {
     // หมายเหตุ: DECIMAL(12,2) จะถูกส่งกลับเป็น string โดย mysql2 ตามค่าเริ่มต้น
     const [rows] = await db.query(
-      `SELECT gid, name, price, description, released_at, rank_score, created_at, updated_at
-       FROM game
-       ORDER BY gid DESC`
+      `SELECT gid,
+              name,
+              price,
+              description,
+              released_at,
+              \`Developer\` AS developer,
+              rank_score,
+              created_at,
+              updated_at
+         FROM game
+        ORDER BY gid DESC`
     );
     return res.json({ success: true, count: rows.length, data: rows });
   } catch (err) {
@@ -85,8 +93,18 @@ exports.getById = async (req, res) => {
 
   try {
     const [[row]] = await db.query(
-      `SELECT gid, name, price, description, released_at, rank_score, created_at, updated_at
-       FROM game WHERE gid = ? LIMIT 1`,
+      `SELECT gid,
+              name,
+              price,
+              description,
+              released_at,
+              \`Developer\` AS developer,
+              rank_score,
+              created_at,
+              updated_at
+         FROM game
+        WHERE gid = ?
+        LIMIT 1`,
       [gid]
     );
     if (!row) return res.status(404).json({ success: false, message: "ไม่พบเกมนี้" });
@@ -110,8 +128,18 @@ exports.create = async (req, res) => {
 
     const gid = result.insertId;
     const [[row]] = await db.query(
-      `SELECT gid, name, price, description, released_at, rank_score, created_at, updated_at
-       FROM game WHERE gid = ? LIMIT 1`,
+      `SELECT gid,
+              name,
+              price,
+              description,
+              released_at,
+              \`Developer\` AS developer,
+              rank_score,
+              created_at,
+              updated_at
+         FROM game
+        WHERE gid = ?
+        LIMIT 1`,
       [gid]
     );
     return res.status(201).json({ success: true, message: "สร้างเกมสำเร็จ", gid, data: row });
@@ -135,14 +163,28 @@ exports.update = async (req, res) => {
 
     await db.query(
       `UPDATE game
-       SET name = ?, price = ?, description = ?, released_at = ?, rank_score = ?
-       WHERE gid = ?`,
+          SET name = ?,
+              price = ?,
+              description = ?,
+              released_at = ?,
+              rank_score = ?
+        WHERE gid = ?`,
       [data.name, data.price, data.description, data.released_at, data.rank_score, gid]
     );
 
     const [[row]] = await db.query(
-      `SELECT gid, name, price, description, released_at, rank_score, created_at, updated_at
-       FROM game WHERE gid = ? LIMIT 1`,
+      `SELECT gid,
+              name,
+              price,
+              description,
+              released_at,
+              \`Developer\` AS developer,
+              rank_score,
+              created_at,
+              updated_at
+         FROM game
+        WHERE gid = ?
+        LIMIT 1`,
       [gid]
     );
     return res.json({ success: true, message: "อัปเดตเกมสำเร็จ", data: row });
@@ -180,8 +222,18 @@ exports.partialUpdate = async (req, res) => {
     await db.query(`UPDATE game SET ${sets.join(", ")} WHERE gid = ?`, vals);
 
     const [[row]] = await db.query(
-      `SELECT gid, name, price, description, released_at, rank_score, created_at, updated_at
-       FROM game WHERE gid = ? LIMIT 1`,
+      `SELECT gid,
+              name,
+              price,
+              description,
+              released_at,
+              \`Developer\` AS developer,
+              rank_score,
+              created_at,
+              updated_at
+         FROM game
+        WHERE gid = ?
+        LIMIT 1`,
       [gid]
     );
     return res.json({ success: true, message: "แก้ไขบางฟิลด์สำเร็จ", data: row });
@@ -245,8 +297,8 @@ exports.getCategoriesByGame = async (req, res) => {
         gcid: r.gcid,
         gid: r.gid,
         tid: r.tid,
-        type_name: r.type_name,     // ชื่อประเภทจาก game_type
-        category_name: r.category_name // ถ้าคุณใช้เก็บชื่อย่อยเฉพาะหมวด (optional)
+        type_name: r.type_name,       // ชื่อประเภทจาก game_type
+        category_name: r.category_name // ถ้ามีชื่อย่อยเฉพาะหมวด
       })),
     });
   } catch (err) {
