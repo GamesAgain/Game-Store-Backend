@@ -108,7 +108,17 @@ exports.getById = async (req, res) => {
       [gid]
     );
     if (!row) return res.status(404).json({ success: false, message: "ไม่พบเกมนี้" });
-    return res.json({ success: true, data: row });
+
+    // 🔹 ดึงรูปทั้งหมดของเกมนี้แนบไปด้วย
+    const [images] = await db.query(
+      `SELECT imgid, gid, url, created_at
+         FROM game_image
+        WHERE gid = ?
+        ORDER BY imgid ASC`,
+      [gid]
+    );
+
+    return res.json({ success: true, data: row, images });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }
@@ -300,6 +310,35 @@ exports.getCategoriesByGame = async (req, res) => {
         type_name: r.type_name,       // ชื่อประเภทจาก game_type
         category_name: r.category_name // ถ้ามีชื่อย่อยเฉพาะหมวด
       })),
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// NEW: GET /games/:gid/images — ดึงรูปทั้งหมดของเกม
+exports.getImagesByGame = async (req, res) => {
+  const gid = Number(req.params.gid);
+  if (!Number.isInteger(gid) || gid <= 0)
+    return res.status(400).json({ success: false, message: "gid ไม่ถูกต้อง" });
+
+  try {
+    const [[game]] = await db.query(`SELECT gid, name FROM game WHERE gid = ? LIMIT 1`, [gid]);
+    if (!game) return res.status(404).json({ success: false, message: "ไม่พบเกมนี้" });
+
+    const [rows] = await db.query(
+      `SELECT imgid, gid, url, created_at
+         FROM game_image
+        WHERE gid = ?
+        ORDER BY imgid ASC`,
+      [gid]
+    );
+
+    return res.json({
+      success: true,
+      game: { gid: game.gid, name: game.name },
+      count: rows.length,
+      images: rows
     });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });

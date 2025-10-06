@@ -13,6 +13,9 @@ router.get("/:gid", gameController.getById);
 // NEW: อ่านหมวด/ประเภททั้งหมดของเกมตาม gid
 router.get("/:gid/categories", gameController.getCategoriesByGame);
 
+// ดึงรูปเกมตาม gid
+router.get("/:gid/images", gameController.getImagesByGame);
+
 // สร้างเกมใหม่ (ควรจำกัดสิทธิ์เป็น ADMIN)
 router.post("/", authMiddleware, gameController.create);
 
