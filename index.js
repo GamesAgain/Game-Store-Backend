@@ -36,6 +36,10 @@ app.use("/api/order", orderRoutes);
 app.use("/api/wallet", walletRoutes);
 app.use("/api/admin", adminRoutes);
 app.use("/api/profile", profileRoutes);
+app.get("/", (req, res) => {
+  res.send("Hello GameShop");
+});
+
 
 app.use("/api/upload", uploadRoutes);
 
