@@ -31,15 +31,6 @@ async function validateGamePayload(body, { partial = false } = {}) {
     else data.price = Number(body.price);
   }
 
-  // tid (FK -> game_type)
-  if (!partial || body.tid !== undefined) {
-    if (body.tid === undefined || body.tid === null || body.tid === "")
-      errors.push("tid: จำเป็น");
-    else if (!Number.isInteger(Number(body.tid)))
-      errors.push("tid: ต้องเป็นจำนวนเต็ม");
-    else data.tid = Number(body.tid);
-  }
-
   // description (optional)
   if (!partial || body.description !== undefined) {
     if (body.description === undefined || body.description === null)
@@ -69,23 +60,17 @@ async function validateGamePayload(body, { partial = false } = {}) {
   return { ok: errors.length === 0, errors, data };
 }
 
-async function ensureTypeExists(tid) {
-  const [[row]] = await db.query(`SELECT 1 FROM game_type WHERE tid = ? LIMIT 1`, [tid]);
-  return !!row;
-}
-
 // ---------- controllers ----------
 
 // GET /games
-exports.list = async (req, res) => {
+exports.list = async (_req, res) => {
   try {
-    // เวอร์ชันเบสิค: คืนทั้งหมด (ต่อยอด pagination/filter ทีหลัง)
+    // หมายเหตุ: DECIMAL(12,2) จะถูกส่งกลับเป็น string โดย mysql2 ตามค่าเริ่มต้น
     const [rows] = await db.query(
-      `SELECT gid, name, price, tid, description, released_at, rank_score, created_at, updated_at
+      `SELECT gid, name, price, description, released_at, rank_score, created_at, updated_at
        FROM game
        ORDER BY gid DESC`
     );
-    // หมายเหตุ: DECIMAL(12,2) จะถูกส่งกลับเป็น string โดย mysql2 ตามค่าเริ่มต้น
     return res.json({ success: true, count: rows.length, data: rows });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
@@ -100,7 +85,7 @@ exports.getById = async (req, res) => {
 
   try {
     const [[row]] = await db.query(
-      `SELECT gid, name, price, tid, description, released_at, rank_score, created_at, updated_at
+      `SELECT gid, name, price, description, released_at, rank_score, created_at, updated_at
        FROM game WHERE gid = ? LIMIT 1`,
       [gid]
     );
@@ -117,19 +102,15 @@ exports.create = async (req, res) => {
   if (!ok) return res.status(400).json({ success: false, message: errors.join(", ") });
 
   try {
-    // ตรวจ FK: tid ต้องมีใน game_type
-    const typeOk = await ensureTypeExists(data.tid);
-    if (!typeOk) return res.status(400).json({ success: false, message: "tid ไม่พบใน game_type" });
-
     const [result] = await db.query(
-      `INSERT INTO game (name, price, tid, description, released_at, rank_score)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-      [data.name, data.price, data.tid, data.description, data.released_at, data.rank_score]
+      `INSERT INTO game (name, price, description, released_at, rank_score)
+       VALUES (?, ?, ?, ?, ?)`,
+      [data.name, data.price, data.description, data.released_at, data.rank_score]
     );
 
     const gid = result.insertId;
     const [[row]] = await db.query(
-      `SELECT gid, name, price, tid, description, released_at, rank_score, created_at, updated_at
+      `SELECT gid, name, price, description, released_at, rank_score, created_at, updated_at
        FROM game WHERE gid = ? LIMIT 1`,
       [gid]
     );
@@ -149,23 +130,18 @@ exports.update = async (req, res) => {
   if (!ok) return res.status(400).json({ success: false, message: errors.join(", ") });
 
   try {
-    // มีอยู่ไหม
     const [[exist]] = await db.query(`SELECT gid FROM game WHERE gid = ? LIMIT 1`, [gid]);
     if (!exist) return res.status(404).json({ success: false, message: "ไม่พบเกมนี้" });
 
-    // ตรวจ FK
-    const typeOk = await ensureTypeExists(data.tid);
-    if (!typeOk) return res.status(400).json({ success: false, message: "tid ไม่พบใน game_type" });
-
     await db.query(
       `UPDATE game
-       SET name = ?, price = ?, tid = ?, description = ?, released_at = ?, rank_score = ?
+       SET name = ?, price = ?, description = ?, released_at = ?, rank_score = ?
        WHERE gid = ?`,
-      [data.name, data.price, data.tid, data.description, data.released_at, data.rank_score, gid]
+      [data.name, data.price, data.description, data.released_at, data.rank_score, gid]
     );
 
     const [[row]] = await db.query(
-      `SELECT gid, name, price, tid, description, released_at, rank_score, created_at, updated_at
+      `SELECT gid, name, price, description, released_at, rank_score, created_at, updated_at
        FROM game WHERE gid = ? LIMIT 1`,
       [gid]
     );
@@ -185,35 +161,26 @@ exports.partialUpdate = async (req, res) => {
   if (!ok) return res.status(400).json({ success: false, message: errors.join(", ") });
 
   try {
-    // มีอยู่ไหม
     const [[exist]] = await db.query(`SELECT gid FROM game WHERE gid = ? LIMIT 1`, [gid]);
     if (!exist) return res.status(404).json({ success: false, message: "ไม่พบเกมนี้" });
 
-    // สร้าง SET แบบไดนามิก
     const sets = [];
     const vals = [];
 
-    if (data.name !== undefined) { sets.push("name = ?"); vals.push(data.name); }
-    if (data.price !== undefined) { sets.push("price = ?"); vals.push(data.price); }
-    if (data.tid !== undefined) {
-      // ตรวจ FK
-      const typeOk = await ensureTypeExists(data.tid);
-      if (!typeOk) return res.status(400).json({ success: false, message: "tid ไม่พบใน game_type" });
-      sets.push("tid = ?"); vals.push(data.tid);
-    }
-    if (data.description !== undefined) { sets.push("description = ?"); vals.push(data.description); }
-    if (data.released_at !== undefined) { sets.push("released_at = ?"); vals.push(data.released_at); }
-    if (data.rank_score !== undefined) { sets.push("rank_score = ?"); vals.push(data.rank_score); }
+    if (data.name !== undefined)         { sets.push("name = ?");         vals.push(data.name); }
+    if (data.price !== undefined)        { sets.push("price = ?");        vals.push(data.price); }
+    if (data.description !== undefined)  { sets.push("description = ?");  vals.push(data.description); }
+    if (data.released_at !== undefined)  { sets.push("released_at = ?");  vals.push(data.released_at); }
+    if (data.rank_score !== undefined)   { sets.push("rank_score = ?");   vals.push(data.rank_score); }
 
     if (sets.length === 0)
       return res.status(400).json({ success: false, message: "ไม่พบฟิลด์ที่จะแก้ไข" });
 
     vals.push(gid);
-
     await db.query(`UPDATE game SET ${sets.join(", ")} WHERE gid = ?`, vals);
 
     const [[row]] = await db.query(
-      `SELECT gid, name, price, tid, description, released_at, rank_score, created_at, updated_at
+      `SELECT gid, name, price, description, released_at, rank_score, created_at, updated_at
        FROM game WHERE gid = ? LIMIT 1`,
       [gid]
     );
@@ -230,22 +197,59 @@ exports.remove = async (req, res) => {
     return res.status(400).json({ success: false, message: "gid ไม่ถูกต้อง" });
 
   try {
-    // เช็คอ้างอิงที่อาจบล็อกการลบ (ตัวอย่าง: cart_item, user_library เป็น ON DELETE RESTRICT)
-    // ถ้าต้องการ soft-delete ให้เพิ่มคอลัมน์สถานะแทน
     const [[exist]] = await db.query(`SELECT gid FROM game WHERE gid = ? LIMIT 1`, [gid]);
     if (!exist) return res.status(404).json({ success: false, message: "ไม่พบเกมนี้" });
 
     await db.query(`DELETE FROM game WHERE gid = ?`, [gid]);
+    // หมายเหตุ: game_category อ้างอิงด้วย FK ON DELETE CASCADE
     return res.json({ success: true, message: "ลบเกมสำเร็จ", gid });
   } catch (err) {
-    // MySQL ER_ROW_IS_REFERENCED_* = 1451/1452
     if (err && (err.errno === 1451 || err.errno === 1452)) {
       return res.status(409).json({
         success: false,
         message:
-          "ลบไม่ได้: มีการอ้างอิงอยู่ (เช่น ถูกเพิ่มในตะกร้า/คลังเกมของผู้ใช้) — พิจารณาย้ายไปใช้ soft delete",
+          "ลบไม่ได้: มีการอ้างอิงอยู่ (เช่น ถูกเพิ่มในตะกร้า/คลังเกมของผู้ใช้) — พิจารณา soft delete",
       });
     }
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// NEW: GET /games/:gid/categories — ดึงหมวด/ประเภททั้งหมดของเกม
+exports.getCategoriesByGame = async (req, res) => {
+  const gid = Number(req.params.gid);
+  if (!Number.isInteger(gid) || gid <= 0)
+    return res.status(400).json({ success: false, message: "gid ไม่ถูกต้อง" });
+
+  try {
+    // ตรวจว่ามีเกมนี้จริง
+    const [[game]] = await db.query(`SELECT gid, name FROM game WHERE gid = ? LIMIT 1`, [gid]);
+    if (!game) return res.status(404).json({ success: false, message: "ไม่พบเกมนี้" });
+
+    // ดึง categories ทั้งหมดของเกม
+    const [rows] = await db.query(
+      `SELECT gc.gcid, gc.gid, gc.tid, gc.category_name,
+              gt.name AS type_name
+         FROM game_category gc
+         JOIN game_type gt ON gc.tid = gt.tid
+        WHERE gc.gid = ?
+        ORDER BY gc.gcid ASC`,
+      [gid]
+    );
+
+    return res.json({
+      success: true,
+      game: { gid: game.gid, name: game.name },
+      count: rows.length,
+      categories: rows.map(r => ({
+        gcid: r.gcid,
+        gid: r.gid,
+        tid: r.tid,
+        type_name: r.type_name,     // ชื่อประเภทจาก game_type
+        category_name: r.category_name // ถ้าคุณใช้เก็บชื่อย่อยเฉพาะหมวด (optional)
+      })),
+    });
+  } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }
 };
