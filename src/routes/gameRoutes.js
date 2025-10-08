@@ -4,28 +4,54 @@ const router = express.Router();
 const gameController = require("../controllers/gameController");
 const { authMiddleware } = require("../middlewares/authMiddleware");
 
+// ⬇️ ใช้ multer จากบริการอัปโหลด (รับหลายไฟล์ field: "images")
+const { upload } = require("../services/upload");
+
+
 // อ่านรายการเกม
 router.get("/", gameController.list);
+
+// ดึง game_type
+router.get("/types", gameController.listGameTypes); // GET /api/game/types
+// ...
 
 // อ่านรายละเอียดเกมตาม gid
 router.get("/:gid", gameController.getById);
 
-// NEW: อ่านหมวด/ประเภททั้งหมดของเกมตาม gid
+// หมวดหมู่ของเกม
 router.get("/:gid/categories", gameController.getCategoriesByGame);
 
-// ดึงรูปเกมตาม gid
+// รูปทั้งหมดของเกม
 router.get("/:gid/images", gameController.getImagesByGame);
 
-// สร้างเกมใหม่ (ควรจำกัดสิทธิ์เป็น ADMIN)
+// สร้างเกม (JSON-only)
 router.post("/", authMiddleware, gameController.create);
 
-// อัปเดตทั้งก้อนไปที่ gid (PUT)
+// ✅ สร้างเกมแบบรวมไฟล์/หมวด (multipart form-data: images[])
+router.post(
+  "/with-media",
+  authMiddleware,
+  upload.array("images", 8),
+  gameController.createWithMedia
+);
+
+// อัปเดตทั้งก้อน (JSON-only)
 router.put("/:gid", authMiddleware, gameController.update);
 
-// อัปเดตบางฟิลด์ (PATCH)
+// ✅ อัปเดตพร้อมไฟล์/หมวด (multipart form-data: images[])
+router.put(
+  "/:gid/with-media",
+  authMiddleware,
+  upload.array("images", 8),
+  gameController.updateWithMedia
+);
+
+// อัปเดตบางฟิลด์ (JSON-only)
 router.patch("/:gid", authMiddleware, gameController.partialUpdate);
 
-// ลบเกมตาม gid
+// ลบเกม
 router.delete("/:gid", authMiddleware, gameController.remove);
+
+
 
 module.exports = router;
