@@ -102,14 +102,12 @@ exports.list = async (_req, res) => {
         ORDER BY gid DESC`
     );
 
-    // หากไม่มีเกมเลย
     if (!games.length) {
       return res.json({ success: true, count: 0, data: [] });
     }
 
     const gids = games.map(g => g.gid);
 
-    // ดึง categories ของทุกเกม (join กับ game_type ได้ type_name)
     const [catRows] = await db.query(
       `SELECT gc.gid, gc.gcid, gc.tid, gc.category_name, gt.name AS type_name
          FROM game_category gc
@@ -119,7 +117,6 @@ exports.list = async (_req, res) => {
       [gids]
     );
 
-    // ดึง images ของทุกเกม
     const [imgRows] = await db.query(
       `SELECT imgid, gid, url, created_at
          FROM game_image
@@ -128,7 +125,6 @@ exports.list = async (_req, res) => {
       [gids]
     );
 
-    // Grouping
     const catsByGid = new Map();
     const imgsByGid = new Map();
 
@@ -155,7 +151,6 @@ exports.list = async (_req, res) => {
       });
     }
 
-    // แนบเข้าในแต่ละเกม
     const data = games.map(g => ({
       ...g,
       categories: catsByGid.get(g.gid) ?? [],
@@ -168,15 +163,13 @@ exports.list = async (_req, res) => {
   }
 };
 
-// GET /games/:gid
-// GET /games/:gid  — คืนเกม 1 รายการ พร้อม categories และ images
+// GET /games/:gid — คืนเกม 1 รายการ พร้อม categories และ images
 exports.getById = async (req, res) => {
   const gid = Number(req.params.gid);
   if (!Number.isInteger(gid) || gid <= 0)
     return res.status(400).json({ success: false, message: "gid ไม่ถูกต้อง" });
 
   try {
-    // ตัวเกม
     const [[game]] = await db.query(
       `SELECT gid, name, price, description, released_at,
               \`Developer\` AS developer, rank_score, created_at, updated_at
@@ -187,7 +180,6 @@ exports.getById = async (req, res) => {
     );
     if (!game) return res.status(404).json({ success: false, message: "ไม่พบเกมนี้" });
 
-    // categories ของเกม (มีทั้ง category_name และ type_name)
     const [catRows] = await db.query(
       `SELECT gc.gcid, gc.tid, gc.category_name, gt.name AS type_name
          FROM game_category gc
@@ -197,7 +189,6 @@ exports.getById = async (req, res) => {
       [gid]
     );
 
-    // images ของเกม
     const [imgRows] = await db.query(
       `SELECT imgid, gid, url, created_at
          FROM game_image
@@ -206,14 +197,13 @@ exports.getById = async (req, res) => {
       [gid]
     );
 
-    // แนบลงใน object เกม
     game.categories = catRows.map(r => ({
       gcid: r.gcid,
       tid: r.tid,
       category_name: r.category_name,
       type_name: r.type_name,
     }));
-    game.images = imgRows; // ถ้าไม่มีจะได้เป็น []
+    game.images = imgRows;
 
     return res.json({ success: true, data: game });
   } catch (err) {
@@ -221,14 +211,12 @@ exports.getById = async (req, res) => {
   }
 };
 
-
 // POST /games (JSON only) — released_at := NOW()
 exports.create = async (req, res) => {
   const { ok, errors, data } = await validateGamePayload(req.body, { partial: false });
   if (!ok) return res.status(400).json({ success: false, message: errors.join(", ") });
 
   try {
-    // ⬇️ ใช้ NOW() ใน SQL แทนค่าจาก client
     const [result] = await db.query(
       `INSERT INTO game (name, price, description, released_at, \`Developer\`, rank_score)
        VALUES (?, ?, ?, NOW(), ?, ?)`,
@@ -249,20 +237,18 @@ exports.create = async (req, res) => {
   }
 };
 
-
 // ✅ POST /games/with-media (multipart + categories + images) — released_at := NOW()
 exports.createWithMedia = async (req, res) => {
   const { ok, errors, data } = await validateGamePayload(req.body, { partial: false });
   if (!ok) return res.status(400).json({ success: false, message: errors.join(", ") });
 
-  const tids = parseIdArray(req.body.categories); // รองรับ "1,2,3" หรือ "[1,2,3]"
+  const tids = parseIdArray(req.body.categories); // "1,2,3" หรือ "[1,2,3]"
   const files = req.files || [];
 
   const conn = await db.getConnection();
   try {
     await conn.beginTransaction();
 
-    // ⬇️ ใช้ NOW() ใน SQL แทนค่าจาก client
     const [ins] = await conn.query(
       `INSERT INTO game (name, price, description, released_at, \`Developer\`, rank_score)
        VALUES (?, ?, ?, NOW(), ?, ?)`,
@@ -270,7 +256,6 @@ exports.createWithMedia = async (req, res) => {
     );
     const gid = ins.insertId;
 
-    // --- ส่วนที่เหลือเหมือนเดิม ---
     if (tids.length) {
       const [types] = await conn.query(
         `SELECT tid, name FROM game_type WHERE tid IN (${tids.map(() => "?").join(",")})`,
@@ -328,7 +313,6 @@ exports.createWithMedia = async (req, res) => {
   }
 };
 
-
 // PUT /games/:gid (JSON only)
 exports.update = async (req, res) => {
   const gid = Number(req.params.gid);
@@ -378,7 +362,9 @@ exports.updateWithMedia = async (req, res) => {
   const { ok, errors, data } = await validateGamePayload(req.body, { partial: true });
   if (!ok) return res.status(400).json({ success: false, message: errors.join(", ") });
 
-  const replaceTids = parseIdArray(req.body.categories); // ถ้าส่งมา = แทนที่หมด
+  // --- สำคัญ: ถ้าส่งฟิลด์ categories มา (แม้จะว่าง) ให้ถือว่า "แทนที่ทั้งหมด" ---
+  const categoriesProvided = Object.prototype.hasOwnProperty.call(req.body, "categories");
+  const replaceTids = categoriesProvided ? parseIdArray(req.body.categories) : null; // null = ไม่แตะ
   const deleteImgIds = parseIdArray(req.body.delete_image_ids);
   const files = req.files || [];
 
@@ -403,27 +389,28 @@ exports.updateWithMedia = async (req, res) => {
       await conn.query(`UPDATE game SET ${sets.join(", ")} WHERE gid = ?`, vals);
     }
 
-    // แทนที่หมวดถ้าส่ง categories มา
-    if (replaceTids.length) {
+    // แทนที่หมวด ถ้าฟิลด์ categories ถูกส่งมา (แม้ค่าว่างก็ลบหมด)
+    if (replaceTids !== null) {
       await conn.query(`DELETE FROM game_category WHERE gid = ?`, [gid]);
-      const [types] = await conn.query(
-        `SELECT tid, name FROM game_type WHERE tid IN (${replaceTids.map(() => "?").join(",")})`,
-        replaceTids
-      );
-      for (const t of types) {
-        await conn.query(
-          `INSERT INTO game_category (gid, tid, category_name) VALUES (?, ?, ?)`,
-          [gid, t.tid, t.name]
+
+      if (replaceTids.length) {
+        const [types] = await conn.query(
+          `SELECT tid, name FROM game_type WHERE tid IN (${replaceTids.map(() => "?").join(",")})`,
+          replaceTids
         );
+        for (const t of types) {
+          await conn.query(
+            `INSERT INTO game_category (gid, tid, category_name) VALUES (?, ?, ?)`,
+            [gid, t.tid, t.name]
+          );
+        }
       }
     }
 
     // ลบรูปตาม id
     if (deleteImgIds.length) {
       await conn.query(
-        `DELETE FROM game_image WHERE gid = ? AND imgid IN (${deleteImgIds
-          .map(() => "?")
-          .join(",")})`,
+        `DELETE FROM game_image WHERE gid = ? AND imgid IN (${deleteImgIds.map(() => "?").join(",")})`,
         [gid, ...deleteImgIds]
       );
     }
@@ -535,8 +522,7 @@ exports.remove = async (req, res) => {
     if (err && (err.errno === 1451 || err.errno === 1452)) {
       return res.status(409).json({
         success: false,
-        message:
-          "ลบไม่ได้: มีการอ้างอิงอยู่ — พิจารณาใช้ soft delete",
+        message: "ลบไม่ได้: มีการอ้างอิงอยู่ — พิจารณาใช้ soft delete",
       });
     }
     return res.status(500).json({ success: false, message: err.message });
