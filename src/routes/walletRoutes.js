@@ -1,32 +1,22 @@
-// routes/walletRoutes.js
 const express = require("express");
 const router = express.Router();
 const walletController = require("../controllers/walletController");
 const { authMiddleware } = require("../middlewares/authMiddleware");
 
-/**
- * หมายเหตุเรื่องสิทธิ์:
- * - ทุกเส้นใช้ token ผ่าน authMiddleware
- * - ถ้าเป็น USER จะเห็นได้เฉพาะของตัวเอง
- * - ถ้าเป็น ADMIN จะส่ง uid ใครมาก็ได้
- */
+// ----- Balance -----
+router.get("/balance", authMiddleware, walletController.getMyBalance);          // ของตัวเอง
+router.get("/balance/:uid", authMiddleware, walletController.getBalanceByUid);  // ADMIN ดูของคนอื่น
 
-// 3.1 ดูยอดคงเหลือกระเป๋า (ผู้ใช้/แอดมิน)
-router.get("/balance/:uid?", authMiddleware, walletController.getUserBalance);
+// ----- Transactions -----
+router.get("/transactions", authMiddleware, walletController.getMyTransactions);
+router.get("/transactions/:uid", authMiddleware, walletController.getTransactionsByUid);
 
-// 3.3/3.4 ประวัติเดินบัญชี (รองรับ paginate + filter วันเวลา)
-router.get("/transactions/:uid?", authMiddleware, walletController.getUserTransactions);
-
-// 3.2 เติมเงิน
-router.post("/topup", authMiddleware, walletController.topup);
-
-// ถอนเงิน (เผื่อใช้งานภายหลัง)
-router.post("/withdraw", authMiddleware, walletController.withdraw);
-
-// โอนเงิน user → user (อ้างปลายทางด้วย username)
-router.post("/transfer", authMiddleware, walletController.transfer);
-
-// low-level: สร้างทรานแซกชันแบบกำหนด type เอง (admin tool/ทดสอบ)
+// ----- Create a raw transaction (self only) -----
 router.post("/transactions", authMiddleware, walletController.createTransaction);
+
+// ----- Money operations -----
+router.post("/topup", authMiddleware, walletController.topup);
+router.post("/withdraw", authMiddleware, walletController.withdraw);
+router.post("/transfer", authMiddleware, walletController.transfer);
 
 module.exports = router;

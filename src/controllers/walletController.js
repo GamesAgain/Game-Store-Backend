@@ -1,15 +1,8 @@
-// controllers/walletController.js
 const db = require("../config/db"); // mysql2/promise pool
 
 // ---------- helpers ----------
-const as2 = (n) => Math.round(n * 100) / 100;
+const isAdmin = (req) => req?.user?.role === "ADMIN";
 
-function parseAmount2(v) {
-  const n = Number(v);
-  if (!isFinite(n)) return null;
-  const r = as2(n);
-  return r > 0 ? r : null;
-}
 function toPosInt(n, def) {
   const x = Number(n);
   return Number.isInteger(x) && x > 0 ? x : def;
@@ -19,69 +12,47 @@ function parseDateOrNull(s) {
   const d = new Date(s);
   return isNaN(d) ? null : d;
 }
+function isPositiveAmount(v) {
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0;
+}
 function normType(t) {
-  const k = String(t || "").toUpperCase();
-  return k === "CREDIT" || k === "DEBIT" ? k : null;
+  const s = String(t || "").toUpperCase();
+  return s === "CREDIT" || s === "DEBIT" ? s : null;
 }
-function canSee(uidFromToken, roleFromToken, targetUid) {
-  return roleFromToken === "ADMIN" || Number(uidFromToken) === Number(targetUid);
-}
-async function withTx(work) {
-  const conn = await db.getConnection();
+
+// ---------- Balance ----------
+exports.getMyBalance = async (req, res) => {
+  const uid = req.user.uid;
   try {
-    await conn.beginTransaction();
-    const result = await work(conn);
-    await conn.commit();
-    return result;
-  } catch (e) {
-    try { await conn.rollback(); } catch {}
-    throw e;
-  } finally {
-    conn.release();
-  }
-}
-
-// ===================== Controllers =====================
-
-// 3.1 GET /wallet/balance/:uid?
-exports.getUserBalance = async (req, res) => {
-  const requesterUid = req.user.uid;
-  const requesterRole = req.user.role;
-  const targetUid = req.params.uid ?? requesterUid;
-
-  if (!canSee(requesterUid, requesterRole, targetUid)) {
-    return res.status(403).json({ success: false, message: "forbidden" });
-  }
-
-  try {
-    // ตามสคีมา: ตาราง users คอลัมน์ wallet_balance (DECIMAL(12,2))
-    const [rows] = await db.query(
-      "SELECT uid, wallet_balance FROM users WHERE uid = ?",
-      [targetUid]
-    );
-    if (!rows.length) {
-      return res.status(404).json({ success: false, message: "ไม่พบบัญชีผู้ใช้" });
-    }
-    return res.json({
-      success: true,
-      uid: rows[0].uid,
-      balance: Number(rows[0].wallet_balance) || 0,
-    });
+    const [[row]] = await db.query("SELECT wallet_balance FROM users WHERE uid = ? LIMIT 1", [uid]);
+    if (!row) return res.status(404).json({ success: false, message: "ไม่พบบัญชีผู้ใช้" });
+    return res.json({ success: true, uid, balance: Number(row.wallet_balance) || 0 });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }
 };
 
-// 3.3/3.4 GET /wallet/transactions/:uid?  (page,pageSize,sort,startDate,endDate)
-exports.getUserTransactions = async (req, res) => {
-  const requesterUid = req.user.uid;
-  const requesterRole = req.user.role;
-  const targetUid = req.params.uid ?? requesterUid;
+exports.getBalanceByUid = async (req, res) => {
+  const targetUid = Number(req.params.uid);
+  if (!Number.isInteger(targetUid) || targetUid <= 0)
+    return res.status(400).json({ success: false, message: "uid ไม่ถูกต้อง" });
 
-  if (!canSee(requesterUid, requesterRole, targetUid)) {
-    return res.status(403).json({ success: false, message: "forbidden" });
+  // อนุญาตเฉพาะ ADMIN หรือเจ้าของเอง
+  if (!isAdmin(req) && targetUid !== req.user.uid)
+    return res.status(403).json({ success: false, message: "ไม่ได้รับอนุญาต" });
+
+  try {
+    const [[row]] = await db.query("SELECT wallet_balance FROM users WHERE uid = ? LIMIT 1", [targetUid]);
+    if (!row) return res.status(404).json({ success: false, message: "ไม่พบบัญชีผู้ใช้" });
+    return res.json({ success: true, uid: targetUid, balance: Number(row.wallet_balance) || 0 });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
   }
+};
 
+// ---------- Transactions (list) ----------
+async function listTransactions(req, res, uid) {
   const page = toPosInt(req.query.page, 1);
   const pageSize = Math.min(100, toPosInt(req.query.pageSize, 20));
   const offset = (page - 1) * pageSize;
@@ -90,272 +61,201 @@ exports.getUserTransactions = async (req, res) => {
   const endDate = parseDateOrNull(req.query.endDate);
 
   const where = ["uid = ?"];
-  const params = [targetUid];
-
+  const params = [uid];
   if (startDate) { where.push("created_at >= ?"); params.push(startDate); }
   if (endDate)   { where.push("created_at <= ?"); params.push(endDate); }
 
   const whereSql = `WHERE ${where.join(" AND ")}`;
 
-  // ตาราง = wallet_transaction (เอกพจน์), คอลัมน์ wid/uid/oid/type/amount/note/created_at
-  const sqlCount = `SELECT COUNT(*) AS total FROM wallet_transaction ${whereSql}`;
-  const sqlData = `
-    SELECT wid, uid, oid, type, amount, note, created_at
-      FROM wallet_transaction
-     ${whereSql}
-     ORDER BY created_at ${sort}, wid ${sort}
-     LIMIT ? OFFSET ?
-  `;
-
   try {
-    const [[countRow]] = await db.query(sqlCount, params);
+    const [[countRow]] = await db.query(`SELECT COUNT(*) AS total FROM wallet_transaction ${whereSql}`, params);
     const total = Number(countRow?.total || 0);
-    const [dataRows] = await db.query(sqlData, [...params, pageSize, offset]);
+
+    const [rows] = await db.query(
+      `SELECT wid, uid, oid, type, amount, note, created_at
+         FROM wallet_transaction
+        ${whereSql}
+        ORDER BY created_at ${sort}, wid ${sort}
+        LIMIT ? OFFSET ?`,
+      [...params, pageSize, offset]
+    );
 
     res.set("X-Total-Count", String(total));
     res.set("X-Page", String(page));
     res.set("X-Page-Size", String(pageSize));
 
-    return res.json({ success: true, data: dataRows });
+    return res.json({ success: true, data: rows });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }
+}
+
+exports.getMyTransactions = async (req, res) => listTransactions(req, res, req.user.uid);
+
+exports.getTransactionsByUid = async (req, res) => {
+  const targetUid = Number(req.params.uid);
+  if (!Number.isInteger(targetUid) || targetUid <= 0)
+    return res.status(400).json({ success: false, message: "uid ไม่ถูกต้อง" });
+  if (!isAdmin(req) && targetUid !== req.user.uid)
+    return res.status(403).json({ success: false, message: "ไม่ได้รับอนุญาต" });
+  return listTransactions(req, res, targetUid);
 };
 
-// 3.2/low-level POST /wallet/transactions  ({ type: CREDIT|DEBIT, amount, note? })
+// ---------- Create raw transaction (self only) ----------
 exports.createTransaction = async (req, res) => {
-  const uid = req.user.uid; // ไม่เปิดให้ยิงแทนคนอื่น (ถ้าจะทำ admin tool ให้เพิ่มเช็ค role และ body.uid)
-  const t = normType(req.body.type);
-  const amt = parseAmount2(req.body.amount);
-  const note = req.body.note || null;
+  const uid = req.user.uid;
+  const type = normType(req.body.type);
+  const amount = Number(req.body.amount);
+  const note = req.body.note ?? null;
 
-  if (!t || amt == null) {
-    return res.status(400).json({
-      success: false,
-      message: "type: CREDIT|DEBIT และ amount > 0 (ทศนิยม 2 ตำแหน่ง) ต้องถูกต้อง",
-    });
-  }
+  if (!type || !isPositiveAmount(amount))
+    return res.status(400).json({ success: false, message: "type(CREDIT|DEBIT) และ amount (>0) ต้องถูกต้อง" });
 
+  const preventNegative = type === "DEBIT";
+
+  const conn = await db.getConnection();
   try {
-    const result = await withTx(async (conn) => {
-      const [[row]] = await conn.query(
-        "SELECT wallet_balance FROM users WHERE uid = ? FOR UPDATE",
-        [uid]
-      );
-      if (!row) return { error: "ไม่พบบัญชีผู้ใช้" };
-
-      const current = Number(row.wallet_balance) || 0;
-      const next = t === "CREDIT" ? as2(current + amt) : as2(current - amt);
-
-      if (t === "DEBIT" && next < 0) {
-        return { error: "ยอดเงินไม่เพียงพอ" };
-      }
-
-      await conn.query(
-        "UPDATE users SET wallet_balance = ? WHERE uid = ?",
-        [next, uid]
-      );
-      const [ins] = await conn.query(
-        `INSERT INTO wallet_transaction (uid, oid, type, amount, note, created_at)
-         VALUES (?, NULL, ?, ?, ?, NOW())`,
-        [uid, t, amt, note]
-      );
-
-      return { new_balance: next, wid: ins.insertId };
+    await conn.beginTransaction();
+    const result = await createTransactionInExistingTx(conn, {
+      uid, type, amount, note, preventNegative
     });
-
-    if (result.error) {
-      return res.status(400).json({ success: false, message: result.error });
-    }
-    return res.status(201).json({
-      success: true,
-      uid,
-      type: t,
-      amount: amt,
-      new_balance: result.new_balance,
-      wid: result.wid,
-    });
+    await conn.commit();
+    return res.status(201).json({ success: true, ...result });
   } catch (err) {
-    return res.status(500).json({ success: false, message: err.message });
+    try { await conn.rollback(); } catch {}
+    const code = /ยอดเงินไม่เพียงพอ/.test(err.message) ? 400 : 500;
+    return res.status(code).json({ success: false, message: err.message });
+  } finally {
+    conn.release();
   }
 };
 
-// 3.2 POST /wallet/topup  ({ amount, note? })
+// ---------- Money operations ----------
 exports.topup = async (req, res) => {
   const uid = req.user.uid;
-  const amt = parseAmount2(req.body.amount);
-  const note = req.body.note ?? "Top up";
+  const amount = Number(req.body.amount);
+  const note = req.body.note ?? "Topup";
+  if (!isPositiveAmount(amount))
+    return res.status(400).json({ success: false, message: "amount (>0) ต้องถูกต้อง" });
 
-  if (amt == null) {
-    return res.status(400).json({ success: false, message: "amount > 0 ไม่ถูกต้อง" });
-  }
-
+  const conn = await db.getConnection();
   try {
-    const result = await withTx(async (conn) => {
-      const [[row]] = await conn.query(
-        "SELECT wallet_balance FROM users WHERE uid = ? FOR UPDATE",
-        [uid]
-      );
-      if (!row) return { error: "ไม่พบบัญชีผู้ใช้" };
-
-      const next = as2(Number(row.wallet_balance) + amt);
-
-      await conn.query("UPDATE users SET wallet_balance = ? WHERE uid = ?", [next, uid]);
-      const [ins] = await conn.query(
-        `INSERT INTO wallet_transaction (uid, oid, type, amount, note, created_at)
-         VALUES (?, NULL, 'CREDIT', ?, ?, NOW())`,
-        [uid, amt, note]
-      );
-
-      return { new_balance: next, wid: ins.insertId };
+    await conn.beginTransaction();
+    const result = await createTransactionInExistingTx(conn, {
+      uid, type: "CREDIT", amount, note
     });
-
-    if (result.error) return res.status(404).json({ success: false, message: result.error });
-
-    return res.status(201).json({
-      success: true,
-      action: "topup",
-      uid,
-      amount: amt,
-      new_balance: result.new_balance,
-      wid: result.wid,
-    });
+    await conn.commit();
+    return res.status(201).json({ success: true, action: "topup", ...result });
   } catch (err) {
+    try { await conn.rollback(); } catch {}
     return res.status(500).json({ success: false, message: err.message });
+  } finally {
+    conn.release();
   }
 };
 
-// POST /wallet/withdraw  ({ amount, note? })
 exports.withdraw = async (req, res) => {
   const uid = req.user.uid;
-  const amt = parseAmount2(req.body.amount);
+  const amount = Number(req.body.amount);
   const note = req.body.note ?? "Withdraw";
+  if (!isPositiveAmount(amount))
+    return res.status(400).json({ success: false, message: "amount (>0) ต้องถูกต้อง" });
 
-  if (amt == null) {
-    return res.status(400).json({ success: false, message: "amount > 0 ไม่ถูกต้อง" });
-  }
-
+  const conn = await db.getConnection();
   try {
-    const result = await withTx(async (conn) => {
-      const [[row]] = await conn.query(
-        "SELECT wallet_balance FROM users WHERE uid = ? FOR UPDATE",
-        [uid]
-      );
-      if (!row) return { error: "ไม่พบบัญชีผู้ใช้" };
-
-      const current = Number(row.wallet_balance) || 0;
-      if (current < amt) return { error: "ยอดเงินไม่เพียงพอ" };
-
-      const next = as2(current - amt);
-
-      await conn.query("UPDATE users SET wallet_balance = ? WHERE uid = ?", [next, uid]);
-      const [ins] = await conn.query(
-        `INSERT INTO wallet_transaction (uid, oid, type, amount, note, created_at)
-         VALUES (?, NULL, 'DEBIT', ?, ?, NOW())`,
-        [uid, amt, note]
-      );
-
-      return { new_balance: next, wid: ins.insertId };
+    await conn.beginTransaction();
+    const result = await createTransactionInExistingTx(conn, {
+      uid, type: "DEBIT", amount, note, preventNegative: true
     });
-
-    if (result.error) return res.status(400).json({ success: false, message: result.error });
-
-    return res.status(201).json({
-      success: true,
-      action: "withdraw",
-      uid,
-      amount: amt,
-      new_balance: result.new_balance,
-      wid: result.wid,
-    });
+    await conn.commit();
+    return res.status(201).json({ success: true, action: "withdraw", ...result });
   } catch (err) {
-    return res.status(500).json({ success: false, message: err.message });
+    try { await conn.rollback(); } catch {}
+    const code = /ยอดเงินไม่เพียงพอ/.test(err.message) ? 400 : 500;
+    return res.status(code).json({ success: false, message: err.message });
+  } finally {
+    conn.release();
   }
 };
 
-// 3.2 (ขยาย) POST /wallet/transfer  ({ toUsername, amount, note? })
+// { toUsername, amount, note? }
 exports.transfer = async (req, res) => {
   const fromUid = req.user.uid;
-  const toUsername = req.body.toUsername;
-  const amt = parseAmount2(req.body.amount);
-  const baseNote = req.body.note || null;
+  const { toUsername } = req.body || {};
+  const amount = Number(req.body.amount);
+  const note = req.body.note ?? null;
 
-  if (!toUsername || amt == null) {
-    return res.status(400).json({ success: false, message: "ต้องระบุ toUsername และ amount > 0" });
-  }
+  if (!toUsername || !isPositiveAmount(amount))
+    return res.status(400).json({ success: false, message: "ต้องระบุ toUsername และ amount (>0)" });
 
+  const conn = await db.getConnection();
   try {
-    const result = await withTx(async (conn) => {
-      // หา toUid ก่อน
-      const [[toUser]] = await conn.query(
-        "SELECT uid FROM users WHERE username = ?",
-        [toUsername]
-      );
-      if (!toUser) return { error: "ไม่พบบัญชีปลายทาง" };
-      const toUid = Number(toUser.uid);
+    await conn.beginTransaction();
 
-      if (toUid === Number(fromUid)) return { error: "ห้ามโอนเข้าบัญชีตัวเอง" };
+    // lock receiver
+    const [[toUser]] = await conn.query(
+      "SELECT uid, wallet_balance FROM users WHERE username = ? FOR UPDATE",
+      [toUsername]
+    );
+    if (!toUser) throw new Error("ไม่พบบัญชีผู้ใช้ปลายทาง");
 
-      // ล็อกทั้งสองฝั่งแบบสั่งรวมเพื่อลดโอกาส deadlock
-      const [locked] = await conn.query(
-        "SELECT uid, wallet_balance FROM users WHERE uid IN (?, ?) FOR UPDATE",
-        [fromUid, toUid]
-      );
-      if (locked.length !== 2) return { error: "บัญชีไม่พร้อมทำรายการ" };
+    // lock sender
+    const [[fromUser]] = await conn.query(
+      "SELECT uid, wallet_balance FROM users WHERE uid = ? FOR UPDATE",
+      [fromUid]
+    );
+    if (!fromUser) throw new Error("ไม่พบบัญชีผู้โอน");
 
-      const fromRow = locked.find(r => Number(r.uid) === Number(fromUid));
-      const toRow   = locked.find(r => Number(r.uid) === Number(toUid));
+    if (fromUser.uid === toUser.uid) throw new Error("ห้ามโอนเข้าบัญชีตัวเอง");
 
-      const fromBal = Number(fromRow.wallet_balance) || 0;
-      const toBal   = Number(toRow.wallet_balance) || 0;
+    const fromBal = Number(fromUser.wallet_balance) || 0;
+    const toBal = Number(toUser.wallet_balance) || 0;
 
-      if (fromBal < amt) return { error: "ยอดเงินไม่เพียงพอ" };
+    if (fromBal < amount) throw new Error("ยอดเงินไม่เพียงพอ");
 
-      const newFrom = as2(fromBal - amt);
-      const newTo   = as2(toBal + amt);
+    const newFrom = +(fromBal - amount).toFixed(2);
+    const newTo = +(toBal + amount).toFixed(2);
 
-      await conn.query("UPDATE users SET wallet_balance = ? WHERE uid = ?", [newFrom, fromUid]);
-      await conn.query("UPDATE users SET wallet_balance = ? WHERE uid = ?", [newTo, toUid]);
+    await conn.query("UPDATE users SET wallet_balance = ? WHERE uid = ?", [newFrom, fromUser.uid]);
+    await conn.query("UPDATE users SET wallet_balance = ? WHERE uid = ?", [newTo, toUser.uid]);
 
-      const noteFrom = baseNote ?? `transfer to ${toUsername}`;
-      const noteTo   = baseNote ?? `transfer from uid:${fromUid}`;
+    const noteFrom = note ?? `transfer to ${toUsername}`;
+    const noteTo   = note ?? `transfer from uid:${fromUid}`;
 
-      const [r1] = await conn.query(
-        `INSERT INTO wallet_transaction (uid, oid, type, amount, note, created_at)
-         VALUES (?, NULL, 'DEBIT', ?, ?, NOW())`,
-        [fromUid, amt, noteFrom]
-      );
-      const [r2] = await conn.query(
-        `INSERT INTO wallet_transaction (uid, oid, type, amount, note, created_at)
-         VALUES (?, NULL, 'CREDIT', ?, ?, NOW())`,
-        [toUid, amt, noteTo]
-      );
+    const [r1] = await conn.query(
+      `INSERT INTO wallet_transaction (uid, type, amount, note, created_at)
+       VALUES (?, 'DEBIT', ?, ?, NOW())`,
+      [fromUser.uid, amount, noteFrom]
+    );
+    const [r2] = await conn.query(
+      `INSERT INTO wallet_transaction (uid, type, amount, note, created_at)
+       VALUES (?, 'CREDIT', ?, ?, NOW())`,
+      [toUser.uid, amount, noteTo]
+    );
 
-      return {
-        from: { uid: Number(fromUid), new_balance: newFrom, wid: r1.insertId },
-        to:   { uid: Number(toUid),   new_balance: newTo,   wid: r2.insertId },
-        amount: amt,
-      };
+    await conn.commit();
+    return res.status(201).json({
+      success: true,
+      message: "โอนเงินสำเร็จ",
+      from: { uid: fromUser.uid, new_balance: newFrom, wid: r1.insertId },
+      to:   { uid: toUser.uid,   new_balance: newTo,   wid: r2.insertId },
+      amount
     });
-
-    if (result.error) return res.status(400).json({ success: false, message: result.error });
-
-    return res.status(201).json({ success: true, message: "โอนเงินสำเร็จ", ...result });
   } catch (err) {
+    try { await conn.rollback(); } catch {}
     return res.status(500).json({ success: false, message: err.message });
+  } finally {
+    conn.release();
   }
 };
 
-// ===== shared for orderController (ถ้าต้องการเรียกใช้ซ้ำ) =====
-exports.createTransactionInExistingTx = async (
+// ---------- Internal: create tx within an existing transaction ----------
+async function createTransactionInExistingTx(
   conn,
-  { uid, type, amount, note = null, preventNegative = true, oid = null }
-) => {
-  const t = normType(type);
-  const amt = parseAmount2(amount);
-  if (!uid || !t || amt == null) {
-    throw new Error("invalid transaction payload");
-  }
+  { uid, type, amount, note, preventNegative = false, oid = null }
+) {
+  const T = normType(type);
+  if (!uid || !T || !isPositiveAmount(amount)) throw new Error("invalid transaction payload");
 
   const [[row]] = await conn.query(
     "SELECT wallet_balance FROM users WHERE uid = ? FOR UPDATE",
@@ -364,15 +264,20 @@ exports.createTransactionInExistingTx = async (
   if (!row) throw new Error("ไม่พบบัญชีผู้ใช้");
 
   const current = Number(row.wallet_balance) || 0;
-  const next = t === "CREDIT" ? as2(current + amt) : as2(current - amt);
+  const delta = T === "CREDIT" ? amount : -amount;
+  const next = +(current + delta).toFixed(2);
+
   if (preventNegative && next < 0) throw new Error("ยอดเงินไม่เพียงพอ");
 
   await conn.query("UPDATE users SET wallet_balance = ? WHERE uid = ?", [next, uid]);
-  const [ins] = await conn.query(
+  const [r] = await conn.query(
     `INSERT INTO wallet_transaction (uid, oid, type, amount, note, created_at)
      VALUES (?, ?, ?, ?, ?, NOW())`,
-    [uid, oid, t, amt, note]
+    [uid, oid, T, amount, note ?? null]
   );
 
-  return { wid: ins.insertId, new_balance: next, type: t, amount: amt };
-};
+  return { wid: r.insertId, uid, type: T, amount, new_balance: next };
+}
+
+// export helper for other modules (e.g., orders)
+exports.createTransactionInExistingTx = createTransactionInExistingTx;
