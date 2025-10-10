@@ -4,25 +4,29 @@ const router = express.Router();
 const walletController = require("../controllers/walletController");
 const { authMiddleware } = require("../middlewares/authMiddleware");
 
-// ✅ ดึงยอดคงเหลือกระเป๋าเงินของผู้ใช้
-router.get("/balance/:uid", authMiddleware, walletController.getUserBalance);
+/**
+ * หมายเหตุเรื่องสิทธิ์:
+ * - ทุกเส้นใช้ token ผ่าน authMiddleware
+ * - ถ้าเป็น USER จะเห็นได้เฉพาะของตัวเอง
+ * - ถ้าเป็น ADMIN จะส่ง uid ใครมาก็ได้
+ */
 
-// ✅ ดึงรายการเดินบัญชีของผู้ใช้ (รองรับ paginate + filter วันที่)
-router.get("/transactions/:uid", authMiddleware, walletController.getUserTransactions);
+// 3.1 ดูยอดคงเหลือกระเป๋า (ผู้ใช้/แอดมิน)
+router.get("/balance/:uid?", authMiddleware, walletController.getUserBalance);
 
-// ✅ สร้างรายการเดินบัญชี (amount เป็นจำนวนเต็ม: บวก=รับเงิน, ลบ=จ่ายเงิน)
-//    จะอัปเดต Users.wallet พร้อมกันแบบ atomic
-router.post("/transactions", authMiddleware, walletController.createTransaction);
+// 3.3/3.4 ประวัติเดินบัญชี (รองรับ paginate + filter วันเวลา)
+router.get("/transactions/:uid?", authMiddleware, walletController.getUserTransactions);
 
-// ------------------ New: Deposit / Withdraw / Transfer ------------------
-
-// ✅ เติมเงินเข้ากระเป๋า
+// 3.2 เติมเงิน
 router.post("/topup", authMiddleware, walletController.topup);
 
-// ✅ ถอนเงินออกจากกระเป๋า
+// ถอนเงิน (เผื่อใช้งานภายหลัง)
 router.post("/withdraw", authMiddleware, walletController.withdraw);
 
-// ✅ โอนเงินจาก fromUid → toUid
+// โอนเงิน user → user (อ้างปลายทางด้วย username)
 router.post("/transfer", authMiddleware, walletController.transfer);
+
+// low-level: สร้างทรานแซกชันแบบกำหนด type เอง (admin tool/ทดสอบ)
+router.post("/transactions", authMiddleware, walletController.createTransaction);
 
 module.exports = router;
