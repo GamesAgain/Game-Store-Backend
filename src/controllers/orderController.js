@@ -21,6 +21,23 @@ async function withTx(work) {
   }
 }
 
+function parseGids(payload) {
+  let arr = [];
+  if (!payload) return arr;
+  if (Array.isArray(payload)) arr = payload;
+  else if (typeof payload === "number") arr = [payload];
+  else if (typeof payload === "string") {
+    try {
+      const j = JSON.parse(payload);
+      if (Array.isArray(j)) arr = j;
+    } catch {
+      arr = String(payload).split(",").map(s => Number(String(s).trim()));
+    }
+  }
+  // กรองให้เหลือเฉพาะจำนวนเต็มบวกที่ไม่ซ้ำ
+  return [...new Set(arr.map(Number).filter(n => Number.isInteger(n) && n > 0))];
+}
+
 /** Utility: ดึงออเดอร์ของผู้ใช้ (lockRow=true จะล็อกด้วย FOR UPDATE) */
 async function loadOwnedOrder(connOrPool, oid, uid, lockRow = false) {
   const lock = lockRow ? " FOR UPDATE" : "";
@@ -570,6 +587,182 @@ exports.payOrder = async (req, res) => {
       success: true,
       message: "ชำระเงินสำเร็จ",
       order: result.order,
+    });
+  } catch (err) {
+    return send500(res, err);
+  }
+};
+
+/** =========================
+ *  NEW: POST /orders/buy
+ *  ซื้อทันที: สร้างออเดอร์ DRAFT -> ใส่สินค้า -> ใส่โปร (ถ้ามี code) -> คำนวณ -> จ่ายเงิน -> ปิดออเดอร์
+ *  Body ตัวอย่าง:
+ *    {
+ *      "games": [1,3,5],          // หรือ "1,3,5" หรือ 5 เดี่ยวๆ ก็ได้
+ *      "promoCode": "NEWUSER10"   // optional
+ *    }
+ *  ========================= */
+exports.buyNow = async (req, res) => {
+  const uid = req.user.uid;
+  const gamesInput = req.body?.games ?? req.body?.gids ?? req.body?.items;
+  const promoCode = req.body?.promoCode || req.body?.code || null;
+
+  const gids = parseGids(gamesInput);
+  if (!gids.length) {
+    return res.status(400).json({ success: false, message: "ต้องระบุ games (อย่างน้อย 1 รายการ)" });
+  }
+
+  try {
+    const result = await withTx(async (conn) => {
+      // 1) สร้างออเดอร์ DRAFT
+      const [ins] = await conn.query(
+        `INSERT INTO orders (uid, status, total_before, total_after, paid_at)
+         VALUES (?, 'DRAFT', 0.00, 0.00, NULL)`,
+        [uid]
+      );
+      const oid = ins.insertId;
+
+      // 2) ตรวจว่าผู้ใช้มีเกมในรายการอยู่แล้วหรือไม่
+      const [alreadyOwned] = await conn.query(
+        `SELECT ul.gid, g.name
+           FROM user_library ul
+           JOIN game g ON g.gid = ul.gid
+          WHERE ul.uid = ? AND ul.gid IN (${gids.map(() => "?").join(",")})
+          LIMIT 10`,
+        [uid, ...gids]
+      );
+      if (alreadyOwned.length > 0) {
+        const names = alreadyOwned.map(r => r.name).join(", ");
+        return { error: `คุณเป็นเจ้าของเกมอยู่แล้ว: ${names}` };
+      }
+
+      // 3) โหลดราคาเกม
+      const [gameRows] = await conn.query(
+        `SELECT gid, price, name FROM game WHERE gid IN (${gids.map(() => "?").join(",")})`,
+        gids
+      );
+      if (gameRows.length !== gids.length) {
+        const found = new Set(gameRows.map(g => g.gid));
+        const missing = gids.filter(x => !found.has(x));
+        return { error: `ไม่พบเกม: ${missing.join(", ")}` };
+      }
+
+      // 4) ใส่ลง cart_item
+      for (const g of gameRows) {
+        await conn.query(
+          `INSERT INTO cart_item (oid, gid, unit_price) VALUES (?, ?, ?)`,
+          [oid, g.gid, g.price]
+        );
+      }
+
+      // 5) ถ้ามี promoCode -> ตั้ง pid ถ้าใช้ได้
+      if (promoCode) {
+        const [[p]] = await conn.query(
+          `SELECT pid, code, discount_type, discount_value, max_uses, used_count, starts_at, expires_at
+             FROM promotion
+            WHERE code = ?
+            LIMIT 1`,
+          [promoCode]
+        );
+        if (p) {
+          const [[{ now }]] = await conn.query(`SELECT NOW() AS now`);
+          const nowDt = new Date(now);
+          if (new Date(p.starts_at) <= nowDt && nowDt <= new Date(p.expires_at)) {
+            await conn.query(`UPDATE orders SET pid = ? WHERE oid = ?`, [p.pid, oid]);
+          }
+        }
+      }
+
+      // 6) คำนวณยอด
+      const totals = await recalcAndSaveTotals(conn, oid);
+      const totalDue = Number(totals.total_after || 0);
+
+      // 7) ล็อกผู้ใช้และตรวจเงิน
+      const [[user]] = await conn.query(
+        `SELECT uid, wallet_balance FROM users WHERE uid = ? FOR UPDATE`,
+        [uid]
+      );
+      if (!user) return { error: "ไม่พบบัญชีผู้ใช้" };
+      if (user.wallet_balance < totalDue) return { error: "ยอดเงินในกระเป๋าไม่เพียงพอ" };
+
+      // 8) ตรวจโปรฯ อีกครั้งแบบ lock (กัน race) และบันทึก usage หลังชำระ
+      const orderLocked = await loadOwnedOrder(conn, oid, uid, true);
+      let promo = null;
+      if (orderLocked.pid) {
+        const lockPromo = await loadValidPromoForOrder(conn, orderLocked, true);
+        if (!lockPromo) {
+          await conn.query(`UPDATE orders SET pid = NULL WHERE oid = ?`, [oid]);
+          await recalcAndSaveTotals(conn, oid);
+        } else {
+          if (lockPromo.max_uses > 0 && lockPromo.used_count >= lockPromo.max_uses) {
+            return { error: "โปรโมชันนี้เต็มสิทธิ์แล้ว" };
+          }
+          const [[dupRedeem]] = await conn.query(
+            `SELECT 1 FROM promotion_redemption WHERE pid = ? AND uid = ? LIMIT 1`,
+            [lockPromo.pid, uid]
+          );
+          if (dupRedeem) return { error: "คุณใช้โปรโมชันนี้ไปแล้ว" };
+          promo = lockPromo;
+        }
+      }
+
+      // 9) หักเงิน + บันทึกธุรกรรม
+      await conn.query(
+        `UPDATE users SET wallet_balance = ROUND(wallet_balance - ?, 2) WHERE uid = ?`,
+        [totalDue, uid]
+      );
+      await conn.query(
+        `INSERT INTO wallet_transaction (uid, oid, type, amount, note)
+         VALUES (?, ?, 'DEBIT', ?, ?)`,
+        [uid, oid, totalDue, `Buy-now order #${oid}`]
+      );
+
+      // 10) ปิดออเดอร์
+      await conn.query(
+        `UPDATE orders SET status = 'PAID', paid_at = NOW() WHERE oid = ?`,
+        [oid]
+      );
+
+      // 11) เพิ่มเกมเข้าไลบรารี
+      await conn.query(
+        `INSERT IGNORE INTO user_library (uid, gid)
+         SELECT ?, ci.gid
+           FROM cart_item ci
+          WHERE ci.oid = ?`,
+        [uid, oid]
+      );
+
+      // 12) บันทึกการใช้โปรฯ (ถ้ามี)
+      if (promo) {
+        await conn.query(
+          `INSERT INTO promotion_redemption (pid, uid, oid) VALUES (?, ?, ?)`,
+          [promo.pid, uid, oid]
+        );
+        await conn.query(
+          `UPDATE promotion SET used_count = used_count + 1 WHERE pid = ?`,
+          [promo.pid]
+        );
+      }
+
+      const [[finalOrder]] = await conn.query(`SELECT * FROM orders WHERE oid = ?`, [oid]);
+      const [items] = await conn.query(
+        `SELECT ci.gid, ci.unit_price, g.name
+           FROM cart_item ci
+           JOIN game g ON g.gid = ci.gid
+          WHERE ci.oid = ?`,
+        [oid]
+      );
+      return { order: finalOrder, items, charged: totalDue };
+    });
+
+    if (result.error) return res.json({ success: false, message: result.error });
+
+    return res.status(201).json({
+      success: true,
+      message: "ซื้อสำเร็จ (สร้างออเดอร์-จ่ายเงิน-เข้าคลังเกมเรียบร้อย)",
+      order: result.order,
+      items: result.items,
+      charged: result.charged
     });
   } catch (err) {
     return send500(res, err);
