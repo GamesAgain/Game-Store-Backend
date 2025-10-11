@@ -45,4 +45,7 @@ router.post("/:oid/recalculate", authMiddleware, orderController.recalculateTota
 // เปลี่ยนสถานะเป็น PAID และตั้ง paid_at = NOW(), บันทึก promotion_redemption (ถ้ามี)
 router.post("/:oid/pay", authMiddleware, orderController.payOrder);
 
+// === Buy Now (สร้างออเดอร์ + ใส่สินค้า + จ่ายเงิน ในครั้งเดียว) ===
+router.post("/buy", authMiddleware, orderController.buyNow);
+
 module.exports = router;
