@@ -10,6 +10,7 @@ const walletRoutes = require("./src/routes/walletRoutes");
 const adminRoutes = require("./src/routes/adminRoutes");
 const uploadRoutes = require("./src/routes/uploadRoutes");
 const profileRoutes = require("./src/routes/profileRoutes");
+const libRoutes = require("./src/routes/libRoutes");
 
 const app = express();
 const os = require("os");
@@ -40,8 +41,8 @@ app.get("/", (req, res) => {
   res.send("Hello GameShop");
 });
 
-
 app.use("/api/upload", uploadRoutes);
+app.use("/api/lib", libRoutes);
 
 const port = process.env.PORT || 3000;
 app.listen(port, () => {
