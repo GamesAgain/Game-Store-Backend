@@ -12,6 +12,7 @@ const uploadRoutes = require("./src/routes/uploadRoutes");
 const profileRoutes = require("./src/routes/profileRoutes");
 const libRoutes = require("./src/routes/libRoutes");
 const promoRoutes = require("./src/routes/promoRoutes");
+const topSellerRoutes = require("./src/routes/topSellerRoutes");
 
 const app = express();
 const os = require("os");
@@ -39,6 +40,7 @@ app.use("/api/wallet", walletRoutes);
 app.use("/api/admin", adminRoutes);
 app.use("/api/profile", profileRoutes);
 app.use("/api/promo", promoRoutes);
+app.use("/api/top-sellers", topSellerRoutes);
 app.get("/", (req, res) => {
   res.send("Hello GameShop");
 });
