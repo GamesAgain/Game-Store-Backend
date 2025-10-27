@@ -26,6 +26,43 @@ function parseDateOnly(input) {
   return { ok: true, value: str };
 }
 
+async function updateRankScores(topRows) {
+  let connection;
+
+  try {
+    connection = await db.getConnection();
+    await connection.beginTransaction();
+
+    await connection.query("UPDATE game SET rank_score = 0");
+
+    if (topRows.length) {
+      const caseFragments = topRows.map(() => "WHEN ? THEN ?").join(" ");
+      const params = [];
+
+      topRows.forEach((row, index) => {
+        params.push(row.gid);
+        params.push(index + 1);
+      });
+
+      const gids = topRows.map((row) => row.gid);
+
+      await connection.query(
+        `UPDATE game
+            SET rank_score = CASE gid ${caseFragments} ELSE rank_score END
+          WHERE gid IN (?)`,
+        [...params, gids]
+      );
+    }
+
+    await connection.commit();
+  } catch (err) {
+    if (connection) await connection.rollback();
+    throw err;
+  } finally {
+    if (connection) connection.release();
+  }
+}
+
 async function queryTopSellers({ date = null } = {}) {
   const whereParts = ["o.status = 'PAID'", "o.paid_at IS NOT NULL"];
   const params = [];
@@ -57,7 +94,16 @@ async function queryTopSellers({ date = null } = {}) {
     params
   );
 
-  if (!rows.length) return [];
+  if (!rows.length) {
+    await updateRankScores([]);
+    return [];
+  }
+
+  rows.forEach((row, index) => {
+    row.rank_score = index + 1;
+  });
+
+  await updateRankScores(rows);
 
   const gids = rows.map((row) => row.gid);
 
