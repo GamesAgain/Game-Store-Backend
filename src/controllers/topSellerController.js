@@ -57,6 +57,34 @@ async function queryTopSellers({ date = null } = {}) {
     params
   );
 
+  if (!rows.length) return [];
+
+  const gids = rows.map((row) => row.gid);
+
+  const [imageRows] = await db.query(
+    `SELECT imgid, gid, url, created_at
+       FROM game_image
+      WHERE gid IN (?)
+      ORDER BY gid ASC, imgid ASC`,
+    [gids]
+  );
+
+  const imagesByGid = new Map();
+
+  for (const gid of gids) {
+    imagesByGid.set(gid, []);
+  }
+
+  for (const image of imageRows) {
+    if (!imagesByGid.has(image.gid)) continue;
+    imagesByGid.get(image.gid).push({
+      imgid: image.imgid,
+      gid: image.gid,
+      url: image.url,
+      created_at: image.created_at,
+    });
+  }
+
   return rows.map((row) => ({
     gid: row.gid,
     name: row.name,
@@ -70,6 +98,7 @@ async function queryTopSellers({ date = null } = {}) {
         : 0,
     first_paid_at: row.first_paid_at,
     last_paid_at: row.last_paid_at,
+    images: imagesByGid.get(row.gid) ?? [],
   }));
 }
 
